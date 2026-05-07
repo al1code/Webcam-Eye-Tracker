@@ -66,5 +66,6 @@ Bu proje MIT Lisansı ile lisanslanmıştır. Detaylar için LICENSE dosyasına 
 **Dilediğiniz gibi kullanabilir, değiştirebilir ve geliştirebilirsiniz.**
 
 YAZARLAR
+
 CANER SAL - Ali KEMAL DİLEK
 
