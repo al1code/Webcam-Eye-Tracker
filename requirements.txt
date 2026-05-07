@@ -1,0 +1,14 @@
+# Core vision & ML
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# GUI overlay
+PyQt5>=5.15.0
+
+# Keyboard hooks
+keyboard>=0.13.5
+
+# Cross-platform screenshot (Windows support)
+Pillow>=10.0.0

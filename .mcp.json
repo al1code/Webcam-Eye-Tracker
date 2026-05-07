@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mcp-server-chart": {
+      "command": "npx",
+      "args": ["-y", "@antv/mcp-server-chart"],
+      "description": "25+ chart types via AntV — used to generate interactive gaze-analysis visuals from session CSV/JSON exports"
+    }
+  }
+}

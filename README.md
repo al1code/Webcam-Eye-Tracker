@@ -1,71 +1,124 @@
-# 👁️ PyEyeTrack: Webcam-Based Global Eye Tracker & Heatmap Analyzer
+# PyEyeTrack — Webcam Eye Tracker & Heatmap Analyzer
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green.svg)
-![MediaPipe](https://img.shields.io/badge/MediaPipe-FaceMesh-orange.svg)
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.8+-green.svg)
+![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10+-orange.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)
 
-Bu proje, standart bir web kamerası kullanarak işletim sistemi seviyesinde çalışan, kullanıcının ekranda nereye baktığını takip eden ve oturum sonunda detaylı bir **Isı Haritası (Heatmap) ve Fiksasyon Analizi** sunan bir göz takip (eye-tracking) yazılımıdır. 
+Standart bir web kamerası kullanarak işletim sistemi seviyesinde çalışan, kullanıcının ekranda nereye baktığını takip eden ve oturum sonunda detaylı **Isı Haritası (Heatmap) + Fiksasyon Analizi** sunan açık kaynaklı bir göz takip yazılımıdır.
 
+---
 
-## ✨ Özellikler (Features)
+## Özellikler
 
-* **Global Şeffaf Katman (Overlay):** PyQt5 kullanılarak işletim sisteminin üzerine şeffaf ve tıklamaları geçiren (click-through) bir katman açılır. Arka planda oyun oynarken, kod yazarken veya web'de gezinirken çalışmaya devam eder.
-* **Gelişmiş Kalibrasyon:** İnsan gözü hareketlerini öğrenmek için Percentile (Yüzdelik) filtreleme kullanır. Anlık kamera hatalarını veya göz kırpmalarını çöpe atarak pürüzsüz bir kalibrasyon sağlar.
-* **Dinamik Yumuşatma (Dynamic Smoothing & Deadzone):** Web kameralarının kronik sorunu olan mikro titremeleri engellemek için Medyan filtreleme ve mesafeye duyarlı hareket kilitleri kullanır.
-* **Oturum Sonu Analiz Raporu:** `ESC` tuşuna basıldığında oturumu kapatır ve kullanıcının ekranda geçirdiği süreyi analiz ederek şunları sunar:
-  * Gaussian Blur destekli yoğunluk ısı haritası (Heatmap).
-  * Fiksasyon (odaklanma) noktaları ve saniye cinsinden süreleri.
-  * Ekranın 3x3 ızgaraya bölünmüş bölge analizi (Hangi bölgeye % kaç bakıldı).
+| Özellik | Açıklama |
+|---|---|
+| **Şeffaf Overlay** | PyQt5 ile işletim sisteminin üzerine tıklamaları geçiren (click-through) katman |
+| **9-Noktalı Kalibrasyon** | Görsel hedeflerle kılavuzlanan, daha doğru kalibrasyon |
+| **Göz Kırpma Tespiti** | Eye Aspect Ratio (EAR) ile gerçek zamanlı blink sayımı |
+| **Gaze Trail** | Son N bakış noktasını soluklaşan iz olarak gösterir |
+| **1080p Kamera Desteği** | Otomatik en yüksek çözünürlük tespiti (1920×1080 → 1280×720 fallback) |
+| **Live HUD** | FPS, oturum süresi, göz kırpma sayısı, veri noktası sayısı |
+| **Turbo Heatmap** | Perceptually superior TURBO colormap (JET'ten daha iyi) |
+| **CSV + JSON Export** | Her oturum sonunda ham veri CSV ve özet JSON kaydı |
+| **Çapraz Platform Screenshot** | Windows (Pillow), macOS (screencapture), Linux (scrot) |
+| **Model Hash Doğrulama** | İndirilen MediaPipe modeline SHA-256 bütünlük kontrolü |
+| **MCP Entegrasyonu** | `@antv/mcp-server-chart` ile Claude Code'dan interaktif grafik üretimi |
 
-## 🚀 Kurulum (Installation)
+---
 
-Projeyi bilgisayarınızda çalıştırmak için Python 3.8 veya üzeri bir sürümün yüklü olması gerekmektedir. (Not: MediaPipe uyumluluğu için Python 3.11 önerilir).
+## Kurulum
 
-**1. Projeyi klonlayın:**
+Python **3.10** veya üzeri gereklidir.
+
+```bash
 git clone https://github.com/al1code/Webcam-Eye-Tracker.git
+cd Webcam-Eye-Tracker
+pip install -r requirements.txt
+```
 
-**2. Gerekli kütüphaneleri yükleyin:**
-pip install opencv-python numpy mediapipe keyboard scipy PyQt5
+> **Not:** `keyboard` kütüphanesi Linux'ta root yetkisi gerektirebilir.
 
-## Kullanım (Usage)
+---
 
-**C Tuşu (Kalibrasyon)** : Programa gözlerinizin hareket sınırlarını öğretmek için **C** tuşuna basın.
-Ekranda turuncu bir uyarı çıkacaktır. Kafanızı sabit tutarak gözlerinizle ekranın 4 köşesine bakın. 
-İşiniz bittiğinde tekrar **C** tuşuna basarak kalibrasyonu tamamlayın.
+## Kullanım
 
-**ESC Tuşu (Çıkış ve Analiz)** : Göz takibi oturumunu sonlandırmak için **ESC** tuşuna basın. 
-Program kapanacak ve saniyeler içinde o oturuma ait tüm hareketlerinizi gösteren tam ekran bir analiz raporu sunacaktır.
-Bu rapor aynı zamanda heatmap_kayitlar klasörüne resim olarak kaydedilir.
+```bash
+python eye_tracker.py
+```
 
-Nasıl Çalışıyor? (How it Works)
-Sistem, Google'ın MediaPipe Face Mesh modelini kullanarak yüzdeki 468 referans noktasını tespit eder. Ancak kafanın hareketini (Head Pose) değil, sadece sağ ve sol göz pınarlarına olan mesafeye göre İrisin (gözbebeği) oransal sapmasını hesaplar.
+İlk çalıştırmada MediaPipe modeli (~30 MB) otomatik indirilir.
 
-Elde edilen bu çiğ (raw) oranlar:
+### Tuş Komutları
 
-1.Göz kırpma (blink) filtrelerinden geçer.
+| Tuş | Eylem |
+|---|---|
+| `C` | 9-noktalı kalibrasyon başlat / bitir |
+| `T` | Gaze Trail göster / gizle |
+| `S` | Anlık heatmap snapshot kaydet |
+| `ESC` | Oturumu bitir ve analiz raporunu göster |
 
-2.Medyan (Median) filtre ile anlık gürültülerden arındırılır.
+### Kalibrasyon İpucu
 
-3.Exponential Smoothing ile yumuşatılır.
+Kalibrasyon modunda ekranda 9 hedef noktası sırayla belirir. Her noktaya **~1.5 saniye** bakın (kafanızı değil, sadece gözlerinizi hareket ettirin). İşlem bitince `C` tuşuna basmanıza gerek yok — otomatik kapanır.
 
-4.Ölü bölge (Deadzone) mantığı ile görsel titremeler kilitlenir.
+---
 
-5.Bilgisayar ekranının piksel çözünürlüğüne (Örn: 1920x1080) matematiksel olarak yayılır (mapping).
+## Çıktılar
 
-## ⚠️ Kısıtlamalar (Limitations)
-Bu proje profesyonel bir donanım (Kızılötesi Lazer) değil, standart RGB Web kamerası kullanmaktadır. Bu nedenle:
+`heatmap_kayitlar/` klasörüne şunlar kaydedilir:
 
-**1.Kalibrasyon yapıldıktan sonra kafanın sabit tutulması gerekmektedir. 
-Kafa açısının veya kameraya olan uzaklığın değişmesi, matematiksel oranları bozacaktır.**
+- `oturum_YYYYMMDD_HHMMSS.png` — Tam analizli heatmap görüntüsü
+- `snapshot_YYYYMMDD_HHMMSS.png` — Anlık snapshot
+- `gaze_data_YYYYMMDD_HHMMSS.csv` — Ham gaze koordinatları (timestamp, x, y)
+- `session_summary_YYYYMMDD_HHMMSS.json` — Oturum özeti (süre, kırpma sayısı, BPM)
 
-**2.Çok düşük ışıklı ortamlarda MediaPipe'ın irisi tespit etme doğruluğu düşebilir**
+---
 
-## 📄 Lisans (License)
-Bu proje MIT Lisansı ile lisanslanmıştır. Detaylar için LICENSE dosyasına göz atabilirsiniz. 
-**Dilediğiniz gibi kullanabilir, değiştirebilir ve geliştirebilirsiniz.**
+## MCP — Claude Code Entegrasyonu
 
-YAZARLAR
+Proje kökündeki `.mcp.json` dosyası, Claude Code'a **@antv/mcp-server-chart** sunucusunu otomatik olarak tanıtır. Bu sayede oturum sonrası CSV verilerinden Claude aracılığıyla interaktif grafikler üretilebilir.
 
-CANER SAL - Ali KEMAL DİLEK
+```bash
+# Gereksinim: Node.js
+npx @antv/mcp-server-chart
+```
 
+Örnek Claude Code komutu:
+> "heatmap_kayitlar/gaze_data_*.csv dosyasından çizgi grafiği oluştur"
+
+---
+
+## Nasıl Çalışır?
+
+1. **MediaPipe Face Landmarker** — 478 yüz noktasından iris merkezi tespiti
+2. **EAR (Eye Aspect Ratio)** — Göz kırpma tespiti
+3. **Medyan Filtre** — Anlık gürültü temizleme
+4. **Exponential Smoothing** — Pürüzsüz hareket
+5. **Deadzone Kilidi** — Mikro titremeleri engeller
+6. **Percentile Kalibrasyon** — Gözün gerçek hareket aralığını öğrenir
+
+---
+
+## Kısıtlamalar
+
+- Standart RGB kamera kullanır, kızılötesi donanım değil — kafanın sabit tutulması önerilir.
+- Düşük ışıkta MediaPipe iris doğruluğu düşebilir.
+- Kalibrasyon sonrası kamera konumunun değişmemesi gerekir.
+
+---
+
+## Güvenlik Notları
+
+- Projede hiçbir API anahtarı, şifre veya kimlik bilgisi bulunmamaktadır.
+- MediaPipe modeli resmi Google Storage URL'inden indirilir.
+- `MODEL_SHA256` sabiti ile isteğe bağlı SHA-256 bütünlük doğrulaması etkinleştirilebilir.
+
+---
+
+## Lisans
+
+MIT License — dilediğiniz gibi kullanabilir, değiştirebilir ve geliştirebilirsiniz.
+
+**Yazarlar:** CANER SAL · Ali KEMAL DİLEK
