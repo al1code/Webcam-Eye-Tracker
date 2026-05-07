@@ -180,6 +180,11 @@ CALIB_X_MIN, CALIB_X_MAX = 0.40, 0.60
 CALIB_Y_MIN, CALIB_Y_MAX = 0.40, 0.60
 calib_data_x: list[float] = []
 calib_data_y: list[float] = []
+calib_point_samples: dict[int, list[tuple[float, float]]] = {}
+current_calib_target_idx: Optional[int] = None
+calibration_coeffs_x: Optional[np.ndarray] = None
+calibration_coeffs_y: Optional[np.ndarray] = None
+calibration_fit_error_px: Optional[float] = None
 
 session_gaze_points: list[tuple] = []   # (x, y, timestamp)
 session_blinks:      list[float] = []   # timestamps of detected blinks
@@ -230,6 +235,84 @@ def get_avg_ear(lm, w: int, h: int) -> float:
     l = eye_aspect_ratio(lm, LEFT_EYE_OUTER, LEFT_EYE_INNER,
                          LEFT_EYE_TOP, LEFT_EYE_BOT, w, h)
     return (r + l) / 2.0
+
+
+def calibration_features(ratio_x: float, ratio_y: float) -> np.ndarray:
+    return np.array(
+        [ratio_x, ratio_y, ratio_x * ratio_y, ratio_x * ratio_x, ratio_y * ratio_y, 1.0],
+        dtype=np.float64,
+    )
+
+
+def summarize_calibration_samples(samples: list[tuple[float, float]]) -> Optional[tuple[float, float]]:
+    if len(samples) < 6:
+        return None
+
+    tail = samples[len(samples) // 2:]
+    arr = np.asarray(tail, dtype=np.float64)
+    return float(np.median(arr[:, 0])), float(np.median(arr[:, 1]))
+
+
+def fit_calibration_model(
+    point_samples: dict[int, list[tuple[float, float]]],
+    targets: list[tuple[int, int]],
+) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+    features = []
+    xs = []
+    ys = []
+
+    for idx, target in enumerate(targets):
+        summary = summarize_calibration_samples(point_samples.get(idx, []))
+        if summary is None:
+            continue
+        features.append(calibration_features(*summary))
+        xs.append(target[0])
+        ys.append(target[1])
+
+    if len(features) < 6:
+        return None
+
+    design = np.vstack(features)
+    target_x = np.asarray(xs, dtype=np.float64)
+    target_y = np.asarray(ys, dtype=np.float64)
+
+    coeffs_x, *_ = np.linalg.lstsq(design, target_x, rcond=None)
+    coeffs_y, *_ = np.linalg.lstsq(design, target_y, rcond=None)
+
+    pred_x = design @ coeffs_x
+    pred_y = design @ coeffs_y
+    fit_error = float(
+        np.mean(np.hypot(pred_x - target_x, pred_y - target_y))
+    )
+    return coeffs_x, coeffs_y, fit_error
+
+
+def map_ratio_to_screen(
+    ratio_x: float,
+    ratio_y: float,
+    screen_w: int,
+    screen_h: int,
+    coeffs_x: Optional[np.ndarray],
+    coeffs_y: Optional[np.ndarray],
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+) -> tuple[int, int]:
+    if coeffs_x is not None and coeffs_y is not None:
+        feat = calibration_features(ratio_x, ratio_y)
+        raw_x = int(float(feat @ coeffs_x))
+        raw_y = int(float(feat @ coeffs_y))
+    else:
+        rx = max(x_max - x_min, 0.001)
+        ry = max(y_max - y_min, 0.001)
+        raw_x = int(((ratio_x - x_min) / rx) * screen_w)
+        raw_y = int(((ratio_y - y_min) / ry) * screen_h)
+
+    return (
+        max(0, min(screen_w - 1, raw_x)),
+        max(0, min(screen_h - 1, raw_y)),
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -289,6 +372,7 @@ class EyeTrackingThread(QThread):
         global is_calibrating, calib_data_x, calib_data_y
         global CALIB_X_MIN, CALIB_X_MAX, CALIB_Y_MIN, CALIB_Y_MAX
         global session_gaze_points, session_blinks, trail_points
+        global current_calib_target_idx, calibration_coeffs_x, calibration_coeffs_y
 
         cap = None
         try:
@@ -356,18 +440,31 @@ class EyeTrackingThread(QThread):
                         calibrating = is_calibrating
                         x_min, x_max = CALIB_X_MIN, CALIB_X_MAX
                         y_min, y_max = CALIB_Y_MIN, CALIB_Y_MAX
+                        coeffs_x = None if calibration_coeffs_x is None else calibration_coeffs_x.copy()
+                        coeffs_y = None if calibration_coeffs_y is None else calibration_coeffs_y.copy()
+                        calib_target_idx = current_calib_target_idx
 
                     if calibrating:
                         with _lock:
                             calib_data_x.append(ratio_x)
                             calib_data_y.append(ratio_y)
+                            if calib_target_idx is not None:
+                                calib_point_samples.setdefault(calib_target_idx, []).append((ratio_x, ratio_y))
                         self.gaze_signal.emit(0, 0, True)
                         continue
 
-                    rx = max(x_max - x_min, 0.001)
-                    ry = max(y_max - y_min, 0.001)
-                    raw_x = int(((ratio_x - x_min) / rx) * self.screen_w)
-                    raw_y = int(((ratio_y - y_min) / ry) * self.screen_h)
+                    raw_x, raw_y = map_ratio_to_screen(
+                        ratio_x,
+                        ratio_y,
+                        self.screen_w,
+                        self.screen_h,
+                        coeffs_x,
+                        coeffs_y,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                    )
 
                     buf_x.append(raw_x)
                     buf_y.append(raw_y)
@@ -812,7 +909,10 @@ class Overlay(QWidget):
     def _on_gaze(self, x: int, y: int, cal: bool):
         self.gaze_x, self.gaze_y, self.calibrating = x, y, cal
         if cal and self.calib.active:
-            self.calib.tick()
+            done = self.calib.tick()
+            self._sync_calibration_target()
+            if done:
+                self._finish_calibration()
 
     def _on_blink(self):
         self.blink_flash = 4
@@ -844,15 +944,85 @@ class Overlay(QWidget):
         QMessageBox.critical(None, "Webcam Eye Tracker", self._error_message or "Bilinmeyen hata")
         QApplication.quit()
 
+    def _sync_calibration_target(self):
+        global current_calib_target_idx
+
+        target_idx = self.calib.current_idx if self.calib.active else None
+        with _lock:
+            current_calib_target_idx = target_idx
+
+    def _start_calibration(self):
+        global is_calibrating, calib_data_x, calib_data_y
+        global calib_point_samples, current_calib_target_idx
+
+        with _lock:
+            is_calibrating = True
+            calib_data_x.clear()
+            calib_data_y.clear()
+            calib_point_samples.clear()
+            current_calib_target_idx = 0
+
+        self.calib.start()
+        self._sync_calibration_target()
+        self.status_message = "Kalibrasyon suruyor..."
+        print("[i] Kalibrasyon basladi — 9 noktayi sirayla takip edin.")
+
+    def _finish_calibration(self, cancelled: bool = False):
+        global is_calibrating, calib_data_x, calib_data_y
+        global CALIB_X_MIN, CALIB_X_MAX, CALIB_Y_MIN, CALIB_Y_MAX
+        global calib_point_samples, current_calib_target_idx
+        global calibration_coeffs_x, calibration_coeffs_y, calibration_fit_error_px
+
+        with _lock:
+            is_calibrating = False
+            dx = list(calib_data_x)
+            dy = list(calib_data_y)
+            point_samples = {idx: list(samples) for idx, samples in calib_point_samples.items()}
+            current_calib_target_idx = None
+
+        self.calib.stop()
+
+        if cancelled:
+            self.status_message = "Kalibrasyon iptal edildi"
+            print("[i] Kalibrasyon iptal edildi.")
+            return
+
+        if len(dx) <= 10 or len(dy) <= 10:
+            self.status_message = "Kalibrasyon verisi yetersiz"
+            print("[!] Yeterli kalibrasyon verisi toplanamadi.")
+            return
+
+        with _lock:
+            CALIB_X_MIN = float(np.percentile(dx, 5))
+            CALIB_X_MAX = float(np.percentile(dx, 95))
+            CALIB_Y_MIN = float(np.percentile(dy, 5))
+            CALIB_Y_MAX = float(np.percentile(dy, 95))
+
+        fit = fit_calibration_model(point_samples, self.calib.targets)
+        if fit is not None:
+            coeffs_x, coeffs_y, fit_error = fit
+            with _lock:
+                calibration_coeffs_x = coeffs_x
+                calibration_coeffs_y = coeffs_y
+                calibration_fit_error_px = fit_error
+            self.status_message = f"Kalibrasyon hazir ({fit_error:.0f}px)"
+            print("[ok] Kalibrasyon tamamlandi.")
+            print(f"    Nokta uyum hatasi: {fit_error:.1f}px")
+        else:
+            with _lock:
+                calibration_coeffs_x = None
+                calibration_coeffs_y = None
+                calibration_fit_error_px = None
+            self.status_message = "Kalibrasyon tamamlandi (fallback)"
+            print("[ok] Kalibrasyon tamamlandi, ancak cok nokta modeli kurulamadi.")
+            print("    Fallback olarak percentile tabanli haritalama kullaniliyor.")
+
     def closeEvent(self, event):
         self._cleanup_runtime()
         super().closeEvent(event)
 
     # ── Key handlers ───────────────────────────────────────────
-    def _toggle_calib(self, _=None):
-        global is_calibrating, calib_data_x, calib_data_y
-        global CALIB_X_MIN, CALIB_X_MAX, CALIB_Y_MIN, CALIB_Y_MAX
-
+    def _toggle_calib_legacy(self, _=None):
         with _lock:
             cur = is_calibrating
 
@@ -879,6 +1049,15 @@ class Overlay(QWidget):
                 print(f"    Y: {CALIB_Y_MIN:.3f} — {CALIB_Y_MAX:.3f}")
             else:
                 print("[!] Yeterli kalibrasyon verisi toplanamadı.")
+
+    def _toggle_calib(self, _=None):
+        with _lock:
+            cur = is_calibrating
+
+        if not cur:
+            self._start_calibration()
+        else:
+            self._finish_calibration(cancelled=not self.calib.active)
 
     def _toggle_trail(self, _=None):
         self.trail_on = not self.trail_on

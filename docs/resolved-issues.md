@@ -44,6 +44,22 @@ Fix:
 - added `python eye_tracker.py --self-test`
 - this validates the model file and webcam access without starting the full overlay session
 
+### 5. 9-point calibration was not truly learning from 9 points
+
+Symptoms:
+- calibration could feel inaccurate even after finishing all targets
+- gaze tended to drift or compress toward broad screen regions
+- the app showed 9 calibration targets but mostly used global percentile ranges
+
+Root cause:
+- calibration data was being collapsed into min/max style bounds instead of fitting a mapping from eye ratios to screen coordinates
+
+Fix:
+- added per-target sample collection during calibration
+- added a polynomial calibration fit from eye ratios to screen coordinates
+- kept percentile mapping as a fallback when sample coverage is insufficient
+- calibration now auto-finalizes when the 9-point sequence completes
+
 ## Verification commands
 
 ```bash

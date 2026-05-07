@@ -33,6 +33,44 @@ class EyeTrackerSmokeTests(unittest.TestCase):
         self.assertEqual(len(fixations), 1)
         self.assertAlmostEqual(fixations[0][2], 0.25, places=2)
 
+    def test_fit_calibration_model_maps_points_close_to_targets(self):
+        targets = [
+            (0, 0),
+            (960, 0),
+            (1920, 0),
+            (0, 540),
+            (960, 540),
+            (1920, 540),
+            (0, 1080),
+            (960, 1080),
+            (1920, 1080),
+        ]
+        samples = {}
+        for idx, (tx, ty) in enumerate(targets):
+            rx = 0.35 + (tx / 1920.0) * 0.30
+            ry = 0.35 + (ty / 1080.0) * 0.24
+            samples[idx] = [(rx, ry)] * 12
+
+        fit = eye_tracker.fit_calibration_model(samples, targets)
+        self.assertIsNotNone(fit)
+        coeffs_x, coeffs_y, fit_error = fit
+        self.assertLess(fit_error, 1.0)
+
+        x, y = eye_tracker.map_ratio_to_screen(
+            0.35 + (960 / 1920.0) * 0.30,
+            0.35 + (540 / 1080.0) * 0.24,
+            1920,
+            1080,
+            coeffs_x,
+            coeffs_y,
+            0.4,
+            0.6,
+            0.4,
+            0.6,
+        )
+        self.assertAlmostEqual(x, 960, delta=3)
+        self.assertAlmostEqual(y, 540, delta=3)
+
 
 if __name__ == "__main__":
     unittest.main()
