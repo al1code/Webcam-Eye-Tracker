@@ -64,3 +64,7 @@ Kafa açısının veya kameraya olan uzaklığın değişmesi, matematiksel oran
 ## 📄 Lisans (License)
 Bu proje MIT Lisansı ile lisanslanmıştır. Detaylar için LICENSE dosyasına göz atabilirsiniz. 
 **Dilediğiniz gibi kullanabilir, değiştirebilir ve geliştirebilirsiniz.**
+
+YAZARLAR
+CANER SAL - Ali KEMAL DİLEK
+
