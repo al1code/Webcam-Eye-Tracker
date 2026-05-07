@@ -11,7 +11,16 @@ Kontroller:
 from __future__ import annotations
 
 import sys
+
+# Windows terminallerinde UTF-8 çıktısını zorla (cp1254 Türkçe kod sayfası sorunu)
+# stdout/stderr None kontrolü: konsolsuz başlatıldığında reconfigure çöker
+if sys.platform == "win32":
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import csv
+import argparse
 import json
 import os
 import platform
@@ -29,7 +38,7 @@ import numpy as np
 import mediapipe as mp
 from scipy.ndimage import gaussian_filter
 
-from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QFont, QRadialGradient, QBrush,
@@ -47,6 +56,7 @@ MODEL_URL    = (
 # Set to expected SHA-256 hex digest to enable integrity check; None = skip
 MODEL_SHA256 = None
 TARGET_FPS   = 30
+CAMERA_READ_FAILURE_LIMIT = TARGET_FPS * 3
 
 # Try resolutions from highest to lowest; pick first one camera actually supports
 CAMERA_RESOLUTIONS = [(1920, 1080), (1280, 720), (640, 480)]
@@ -101,20 +111,34 @@ def _download_model(url: str, dest: str) -> None:
     print("[✓] Model indirildi.")
 
 
-if not os.path.exists(MODEL_PATH):
-    _download_model(MODEL_URL, MODEL_PATH)
+_face_landmarker = None
+_face_landmarker_lock = threading.Lock()
 
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
 
-_base_opts = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-_lm_opts   = mp_vision.FaceLandmarkerOptions(
-    base_options=_base_opts,
-    output_face_blendshapes=False,
-    output_facial_transformation_matrixes=False,
-    num_faces=1,
-)
-face_landmarker = mp_vision.FaceLandmarker.create_from_options(_lm_opts)
+def ensure_model_file() -> str:
+    if not os.path.exists(MODEL_PATH):
+        _download_model(MODEL_URL, MODEL_PATH)
+    return MODEL_PATH
+
+
+def get_face_landmarker():
+    global _face_landmarker
+
+    with _face_landmarker_lock:
+        if _face_landmarker is None:
+            ensure_model_file()
+            from mediapipe.tasks import python as mp_python
+            from mediapipe.tasks.python import vision as mp_vision
+
+            base_opts = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+            lm_opts   = mp_vision.FaceLandmarkerOptions(
+                base_options=base_opts,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+                num_faces=1,
+            )
+            _face_landmarker = mp_vision.FaceLandmarker.create_from_options(lm_opts)
+    return _face_landmarker
 
 
 # ──────────────────────────────────────────────────────────────
@@ -215,6 +239,8 @@ class EyeTrackingThread(QThread):
     gaze_signal  = pyqtSignal(int, int, bool)
     blink_signal = pyqtSignal()
     fps_signal   = pyqtSignal(float)
+    status_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
 
     def __init__(self, screen_w: int, screen_h: int):
         super().__init__()
@@ -223,6 +249,31 @@ class EyeTrackingThread(QThread):
         self.running  = True
 
     def _open_camera(self):
+        backends = [cv2.CAP_ANY]
+        if sys.platform == "win32" and hasattr(cv2, "CAP_DSHOW"):
+            backends.insert(0, cv2.CAP_DSHOW)
+
+        for backend in backends:
+            cap = cv2.VideoCapture(CAMERA_INDEX, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+
+            for rw, rh in CAMERA_RESOLUTIONS:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
+                aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if aw >= rw * 0.9:
+                    print(f"[ok] Kamera cozumunurlugu: {aw}x{ah}")
+                    break
+            return cap
+
+        raise RuntimeError(
+            "Webcam acilamadi. Kamera bagli oldugunu, baska bir uygulama tarafindan kullanilmadigini "
+            "ve CAMERA_INDEX degerinin dogru oldugunu kontrol edin."
+        )
+
         cap = cv2.VideoCapture(CAMERA_INDEX)
         for rw, rh in CAMERA_RESOLUTIONS:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH,  rw)
@@ -238,6 +289,124 @@ class EyeTrackingThread(QThread):
         global is_calibrating, calib_data_x, calib_data_y
         global CALIB_X_MIN, CALIB_X_MAX, CALIB_Y_MIN, CALIB_Y_MAX
         global session_gaze_points, session_blinks, trail_points
+
+        cap = None
+        try:
+            self.status_signal.emit("Webcam baglantisi kontrol ediliyor...")
+            cap = self._open_camera()
+
+            self.status_signal.emit("Face landmarker yukleniyor...")
+            face_landmarker = get_face_landmarker()
+            self.status_signal.emit("Takip hazir.")
+
+            smooth_x = self.screen_w // 2
+            smooth_y = self.screen_h // 2
+            disp_x   = smooth_x
+            disp_y   = smooth_y
+            buf_x:   list[int] = []
+            buf_y:   list[int] = []
+
+            blink_ctr  = 0
+            fps_cnt    = 0
+            fps_t0     = time.time()
+            frame_int  = 1.0 / TARGET_FPS
+            read_failures = 0
+
+            while self.running:
+                t0 = time.time()
+                ret, frame = cap.read()
+                if not ret:
+                    read_failures += 1
+                    if read_failures >= CAMERA_READ_FAILURE_LIMIT:
+                        raise RuntimeError(
+                            "Webcam acildi ancak goruntu okunamiyor. Kamera erisimini ve suruculeri kontrol edin."
+                        )
+                    time.sleep(0.05)
+                    continue
+
+                read_failures = 0
+                frame  = cv2.flip(frame, 1)
+                h, w   = frame.shape[:2]
+                rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                result = face_landmarker.detect(mp_img)
+
+                fps_cnt += 1
+                if time.time() - fps_t0 >= 1.0:
+                    self.fps_signal.emit(fps_cnt / (time.time() - fps_t0))
+                    fps_cnt = 0
+                    fps_t0  = time.time()
+
+                if result.face_landmarks:
+                    lm = result.face_landmarks[0]
+
+                    ear = get_avg_ear(lm, w, h)
+                    if ear < EAR_THRESHOLD:
+                        blink_ctr += 1
+                    else:
+                        if blink_ctr >= BLINK_CONSEC_FRAMES:
+                            with _lock:
+                                session_blinks.append(time.time())
+                            self.blink_signal.emit()
+                        blink_ctr = 0
+
+                    ratio_x, ratio_y = get_eye_ratios(lm, w, h)
+
+                    with _lock:
+                        calibrating = is_calibrating
+                        x_min, x_max = CALIB_X_MIN, CALIB_X_MAX
+                        y_min, y_max = CALIB_Y_MIN, CALIB_Y_MAX
+
+                    if calibrating:
+                        with _lock:
+                            calib_data_x.append(ratio_x)
+                            calib_data_y.append(ratio_y)
+                        self.gaze_signal.emit(0, 0, True)
+                        continue
+
+                    rx = max(x_max - x_min, 0.001)
+                    ry = max(y_max - y_min, 0.001)
+                    raw_x = int(((ratio_x - x_min) / rx) * self.screen_w)
+                    raw_y = int(((ratio_y - y_min) / ry) * self.screen_h)
+
+                    buf_x.append(raw_x)
+                    buf_y.append(raw_y)
+                    if len(buf_x) > MEDIAN_WINDOW:
+                        buf_x.pop(0)
+                        buf_y.pop(0)
+                    med_x = int(np.median(buf_x))
+                    med_y = int(np.median(buf_y))
+
+                    smooth_x = int(SMOOTH_PREV * smooth_x + SMOOTH_RAW * med_x)
+                    smooth_y = int(SMOOTH_PREV * smooth_y + SMOOTH_RAW * med_y)
+
+                    if np.hypot(smooth_x - disp_x, smooth_y - disp_y) >= DEAD_ZONE_PX:
+                        disp_x = smooth_x
+                        disp_y = smooth_y
+
+                    tx = max(0, min(self.screen_w  - 1, disp_x))
+                    ty = max(0, min(self.screen_h - 1, disp_y))
+
+                    with _lock:
+                        session_gaze_points.append((tx, ty, time.time()))
+                        trail_points.append((tx, ty, time.time()))
+                        if len(trail_points) > TRAIL_LENGTH:
+                            trail_points.pop(0)
+
+                    self.gaze_signal.emit(tx, ty, False)
+
+                elapsed = time.time() - t0
+                st = frame_int - elapsed
+                if st > 0:
+                    time.sleep(st)
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            print(f"[!] {message}")
+            self.error_signal.emit(message)
+        finally:
+            if cap is not None:
+                cap.release()
+        return
 
         cap = self._open_camera()
 
@@ -370,18 +539,23 @@ def zone_analysis(points, w: int, h: int, cols: int = 3, rows: int = 3):
 def fixation_analysis(points, radius: int = 60, min_dur: float = 0.15):
     if len(points) < 2:
         return []
+
+    def append_fixation(cluster_points, out):
+        dur = cluster_points[-1][2] - cluster_points[0][2]
+        if dur >= min_dur:
+            mx = int(np.mean([p[0] for p in cluster_points]))
+            my = int(np.mean([p[1] for p in cluster_points]))
+            out.append((mx, my, dur))
+
     fixations = []
     cluster   = [points[0]]
     for pt in points[1:]:
         if np.hypot(pt[0] - cluster[0][0], pt[1] - cluster[0][1]) < radius:
             cluster.append(pt)
         else:
-            dur = cluster[-1][2] - cluster[0][2]
-            if dur >= min_dur:
-                mx = int(np.mean([p[0] for p in cluster]))
-                my = int(np.mean([p[1] for p in cluster]))
-                fixations.append((mx, my, dur))
+            append_fixation(cluster, fixations)
             cluster = [pt]
+    append_fixation(cluster, fixations)
     return fixations
 
 
@@ -595,6 +769,9 @@ class Overlay(QWidget):
         self.blink_flash  = 0
         self.trail_on     = TRAIL_ENABLED
         self.t_start      = time.time()
+        self.status_message = "Baslatiliyor..."
+        self._error_message = None
+        self._keyboard = None
 
         self.calib        = CalibrationManager(self.sw, self.sh)
 
@@ -602,17 +779,25 @@ class Overlay(QWidget):
         self.thread.gaze_signal.connect(self._on_gaze)
         self.thread.blink_signal.connect(self._on_blink)
         self.thread.fps_signal.connect(self._on_fps)
+        self.thread.status_signal.connect(self._on_status)
+        self.thread.error_signal.connect(self._on_error)
         self.thread.start()
 
         self._timer = QTimer()
         self._timer.timeout.connect(self.update)
         self._timer.start(33)
 
-        import keyboard
-        keyboard.on_press_key("c",   self._toggle_calib)
-        keyboard.on_press_key("t",   self._toggle_trail)
-        keyboard.on_press_key("s",   self._snapshot)
-        keyboard.on_press_key("esc", self._quit)
+        try:
+            import keyboard
+
+            keyboard.on_press_key("c",   self._toggle_calib)
+            keyboard.on_press_key("t",   self._toggle_trail)
+            keyboard.on_press_key("s",   self._snapshot)
+            keyboard.on_press_key("esc", self._quit)
+            self._keyboard = keyboard
+        except Exception as exc:
+            self.status_message = "Global tus kisayollari devre disi"
+            print(f"[!] Keyboard hook devreye alinamadi: {exc}")
 
         print("\n" + "=" * 60)
         print(" GÖZ TAKİBİ — ENHANCED EDITION ".center(60, "="))
@@ -634,6 +819,34 @@ class Overlay(QWidget):
 
     def _on_fps(self, fps: float):
         self.fps = fps
+
+    def _on_status(self, message: str):
+        self.status_message = message
+
+    def _on_error(self, message: str):
+        if self._error_message is not None:
+            return
+        self._error_message = message
+        self.status_message = message
+        QTimer.singleShot(0, self._show_error_and_quit)
+
+    def _cleanup_runtime(self):
+        if self._keyboard is not None:
+            self._keyboard.unhook_all()
+            self._keyboard = None
+        self._timer.stop()
+        if self.thread.isRunning():
+            self.thread.stop()
+
+    def _show_error_and_quit(self):
+        self._cleanup_runtime()
+        self.hide()
+        QMessageBox.critical(None, "Webcam Eye Tracker", self._error_message or "Bilinmeyen hata")
+        QApplication.quit()
+
+    def closeEvent(self, event):
+        self._cleanup_runtime()
+        super().closeEvent(event)
 
     # ── Key handlers ───────────────────────────────────────────
     def _toggle_calib(self, _=None):
@@ -687,10 +900,7 @@ class Overlay(QWidget):
 
     def _quit(self, _=None):
         print("\n[i] Çıkılıyor...")
-        import keyboard as kb
-        kb.unhook_all()
-        self._timer.stop()
-        self.thread.stop()
+        self._cleanup_runtime()
         self.hide()
         with _lock:
             pts    = list(session_gaze_points)
@@ -814,6 +1024,26 @@ class Overlay(QWidget):
             n_pts    = len(session_gaze_points)
         elapsed = time.time() - self.t_start
 
+        hud_lines = [
+            f"FPS: {self.fps:.0f}",
+            f"SÃ¼re: {elapsed:.0f}s",
+            f"GÃ¶z kÄ±rpma: {n_blinks}",
+            f"Veri noktasÄ±: {n_pts}",
+            f"Trail: {'ON' if self.trail_on else 'OFF'}",
+            f"Durum: {self.status_message}",
+        ]
+
+        p.setBrush(QColor(0, 0, 0, 115))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(8, 8, 320, 114, 7, 7)
+
+        font = QFont("Consolas", 10)
+        p.setFont(font)
+        p.setPen(QColor(140, 255, 140))
+        for i, ln in enumerate(hud_lines):
+            p.drawText(16, 30 + i * 17, ln)
+        return
+
         p.setBrush(QColor(0, 0, 0, 115))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(8, 8, 200, 96, 7, 7)
@@ -832,8 +1062,49 @@ class Overlay(QWidget):
 
 
 # ──────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+def run_self_test() -> int:
+    print("== Webcam Eye Tracker self-test ==")
+    ok = True
+
+    try:
+        ensure_model_file()
+        print(f"[ok] Model dosyasi hazir: {MODEL_PATH}")
+    except Exception as exc:
+        ok = False
+        print(f"[hata] Model kontrolu basarisiz: {exc}")
+
+    probe = EyeTrackingThread(1920, 1080)
+    cap = None
+    try:
+        cap = probe._open_camera()
+        print("[ok] Webcam baglantisi kuruldu.")
+    except Exception as exc:
+        ok = False
+        print(f"[hata] Webcam testi basarisiz: {exc}")
+    finally:
+        if cap is not None:
+            cap.release()
+
+    return 0 if ok else 1
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Webcam Eye Tracker")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Model ve webcam erisimini kontrol edip cik.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        return run_self_test()
+
     app     = QApplication(sys.argv)
     overlay = Overlay()
     overlay.show()
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

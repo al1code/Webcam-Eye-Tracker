@@ -2,3 +2,5 @@ __pycache__/
 face_landmarker.task
 heatmap_kayitlar/
 temp_screen_shot.png
+run_err.txt
+run_log.txt

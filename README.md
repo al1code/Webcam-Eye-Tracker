@@ -50,6 +50,14 @@ python eye_tracker.py
 
 İlk çalıştırmada MediaPipe modeli (~30 MB) otomatik indirilir.
 
+Başlangıç problemlerini hızlı kontrol etmek için:
+
+```bash
+py -3.12 eye_tracker.py --self-test
+```
+
+Bulunan ve çözülen çalışma zamanı sorunları için [docs/resolved-issues.md](docs/resolved-issues.md) dosyasına bakın.
+
 ### Tuş Komutları
 
 | Tuş | Eylem |
